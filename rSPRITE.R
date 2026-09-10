@@ -194,32 +194,34 @@ rSprite.checkGrim <- function (N, tMean, dp) {
 # Determine minimum and maximum SDs for given scale ranges, N, and mean.
 rSprite.sdLimits <- function (N, tMean, scaleMin, scaleMax, dp) {
   result <- c(rSprite.huge, -rSprite.huge)        # impossible values
+  width <- scaleMax - scaleMin
+  if (N < 2 || width <= 0) return(result)
 
-  aMax <- scaleMin                                # "aMax" means "value of a to produce the max SD"
-  aMin <- floor(tMean)
-  bMax <- max(scaleMax, scaleMin + 1, aMin + 1)   # sanity check (just scaleMax would normally be ok)
-  bMin <- aMin + 1
-  total <- round(tMean * N)
-  for (abm in list(c(aMin, bMin, 1), c(aMax, bMax, 2))) {
-    a <- abm[1]
-    b <- abm[2]
-    m <- abm[3]
+# Include every integer total compatible with the reported mean. Centre on
+# the scale minimum to avoid cancellation when the scale has a large offset.
+  granule <- ((0.1 ^ dp) / 2) + rSprite.dust
+  meanZB <- round(tMean - scaleMin, dp)
+  lower <- max(0, ceiling((meanZB - granule) * N))
+  upper <- min(N * width, floor((meanZB + granule) * N))
+  if (lower > upper) return(result)
+  totals <- seq(lower, upper)
 
-    k <- round((total - (N * b)) / (a - b))
-    k <- min(max(k, 1), N - 1)               # ensure there is at least one of each of two numbers
-    vec <- c(rep(a, k), rep(b, N - k))
-    diff <- sum(vec) - total
+# The minimum uses adjacent integers. The maximum uses the scale endpoints
+# with at most one interior response. Compute centred sums of squares directly.
+  remainder <- totals %% N
+  minVariance <- remainder * (N - remainder) / N / (N - 1)
+  highCount <- floor(totals / width)
+  interior <- totals - highCount * width
+  interiorCount <- as.numeric(interior > 0)
+  lowCount <- N - highCount - interiorCount
+  means <- totals / N
+  maxVariance <- (highCount * (width - means)^2 + lowCount * means^2 +
+                 interiorCount * (interior - means)^2) / (N - 1)
 
-    if (diff < 0) {
-      vec <- c(rep(a, k - 1), a + abs(diff), rep(b, N - k))
-    }
-    else if (diff > 0) {
-      vec <- c(rep(a, k), b - diff, rep(b, N - k - 1))
-    }
-
-    result[m] <- round(sd(vec), dp)
-  }
-
+# As in the mean/SD search, accept either direction at a rounding tie.
+  factor <- 10 ^ dp
+  result[1] <- max(0, ceiling((sqrt(min(minVariance)) - granule) * factor) / factor)
+  result[2] <- floor((sqrt(max(maxVariance)) + granule) * factor) / factor
   return(result)
 }
 
@@ -383,8 +385,11 @@ rSprite.seekVector <- function (N, tMean, tSD, scaleMin, scaleMax, dp=2, fixed=c
 
   if (!is.na(avoid)) {         # replace any of the fixed numbers with a random non-fixed number
     whichFixed <- which(vec == avoid)
-    notFixed <- sample(setdiff(min(vec):max(vec), avoid), length(whichFixed), replace=TRUE)
-    vec[whichFixed] <- notFixed
+    if (length(whichFixed) > 0) {
+      possible <- setdiff(scaleMin:scaleMax, avoid)
+      if (length(possible) == 0) return(result)
+      vec[whichFixed] <- possible[sample.int(length(possible), length(whichFixed), replace=TRUE)]
+    }
   }
 
 # Adjust mean of starting data.
@@ -438,14 +443,16 @@ rSprite.seekVector <- function (N, tMean, tSD, scaleMin, scaleMax, dp=2, fixed=c
   maxLoops <- min(max(round(N * ((scaleMax - scaleMin) ^ 2)), rSprite.maxDeltaLoopsLower), rSprite.maxDeltaLoopsUpper)
   found <- FALSE
 
-  for (i in 1:maxLoops) {
+  for (i in 0:maxLoops) {
     cSD <- sd(c(vec, fixed))
     if (abs(cSD - tSD) <= granule) {
       result <- vec
       break
     }
 
-    vec <- rSprite.delta(vec, tMean, tSD, scaleMin, scaleMax, dp, fixed, never)
+    if (i < maxLoops) {
+      vec <- rSprite.delta(vec, tMean, tSD, scaleMin, scaleMax, dp, fixed, never)
+    }
   }
 
   return(result)
@@ -460,6 +467,10 @@ rSprite.getSample <- function (maxCases, N, tMean, tSD, scaleMin, scaleMax, dp=2
 
 # Determine minimum and maximum SDs.
   sdLimits <- rSprite.sdLimits(N, tMean, scaleMin, scaleMax, dp)
+  if (sdLimits[1] > sdLimits[2]) {
+    rSprite.message("No SD range is defined for this sample size, mean, and scale.", shinyType="warning")
+    return(result)
+  }
 
   for (m in 1:2) {
     mSD <- sdLimits[m]
